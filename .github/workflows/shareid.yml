@@ -20,7 +20,8 @@ jobs:
           HD = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
-                "Referer": CFG["ref"]}
+                "Referer": CFG["ref"],
+                "Authorization": base64.b64encode(CFG["auth"].encode()).decode()}
 
           def req(method, path, body=None):
               data = json.dumps(body).encode() if body is not None else None
@@ -30,13 +31,13 @@ jobs:
               try:
                   r = urllib.request.urlopen(urllib.request.Request(H + path, data=data, method=method, headers=hd), timeout=30)
               except urllib.error.HTTPError as e:
-                  print("HTTP", e.code, e.read().decode()[:160], flush=True)
+                  print("HTTP", e.code, e.read().decode()[:600], flush=True)
                   return {}
               raw = r.read().decode()
               try:
                   return json.loads(raw)
               except Exception:
-                  print("RAW", raw[:160], flush=True)
+                  print("RAW", raw[:600], flush=True)
                   return {}
 
           mob = CFG["mob"]
