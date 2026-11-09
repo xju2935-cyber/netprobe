@@ -54,8 +54,10 @@ jobs:
           if not tok:
               for t in CFG["ts"]:
                   r3 = req("POST", CFG["l"], {"grantType": "PASSWORD", "username": mob, "password": CFG["pwd"], "type": t})
-                  tok = (r3.get("data") or {}).get("token")
-                  print("B code=%s" % r3.get("code"), flush=True)
+                  d3 = r3.get("data") or {}
+                  tok = d3.get("token")
+                  dd = {k: v for k, v in d3.items() if "token" not in k.lower()}
+                  print("B code=%s data=%s" % (r3.get("code"), json.dumps(dd, ensure_ascii=False, default=str)[:1200]), flush=True)
                   if tok:
                       break
           if not tok:
@@ -63,5 +65,6 @@ jobs:
               raise SystemExit(1)
           rv = req("GET", CFG["v"] + tok)
           print("V code=%s" % rv.get("code"), flush=True)
+          print("SESS %s" % json.dumps(rv.get("data"), ensure_ascii=False, default=str)[:1500], flush=True)
           print("TOK=" + tok, flush=True)
           PY
