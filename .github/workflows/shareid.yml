@@ -1,0 +1,66 @@
+name: shareid
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: run
+        env:
+          SHARE_I: ${{ secrets.SHARE_I }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request, urllib.error
+
+          CFG = json.loads(base64.b64decode(os.environ["SHARE_I"]).decode())
+          H = CFG["host"]
+          HD = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Referer": CFG["ref"]}
+
+          def req(method, path, body=None):
+              data = json.dumps(body).encode() if body is not None else None
+              hd = dict(HD)
+              if data is not None:
+                  hd["Content-Type"] = "application/json"
+              try:
+                  r = urllib.request.urlopen(urllib.request.Request(H + path, data=data, method=method, headers=hd), timeout=30)
+              except urllib.error.HTTPError as e:
+                  print("HTTP", e.code, e.read().decode()[:160], flush=True)
+                  return {}
+              raw = r.read().decode()
+              try:
+                  return json.loads(raw)
+              except Exception:
+                  print("RAW", raw[:160], flush=True)
+                  return {}
+
+          mob = CFG["mob"]
+          r1 = req("GET", CFG["a"] + mob)
+          emps = r1.get("data") or []
+          print("A code=%s n=%d" % (r1.get("code"), len(emps)), flush=True)
+          tok = None
+          if emps:
+              uid = emps[0].get("userId")
+              print("A id=%s" % uid, flush=True)
+              r2 = req("POST", CFG["b"] + str(uid))
+              tok = (r2.get("data") or {}).get("token")
+              print("A2 code=%s" % r2.get("code"), flush=True)
+          if not tok:
+              for t in CFG["ts"]:
+                  r3 = req("POST", CFG["l"], {"grantType": "PASSWORD", "username": mob, "password": CFG["pwd"], "type": t})
+                  tok = (r3.get("data") or {}).get("token")
+                  print("B code=%s" % r3.get("code"), flush=True)
+                  if tok:
+                      break
+          if not tok:
+              print("TOK none", flush=True)
+              raise SystemExit(1)
+          rv = req("GET", CFG["v"] + tok)
+          print("V code=%s" % rv.get("code"), flush=True)
+          print("TOK=" + tok, flush=True)
+          PY
