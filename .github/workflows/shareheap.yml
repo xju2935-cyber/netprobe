@@ -1,0 +1,110 @@
+name: shareheap
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: run
+        env:
+          SHARE_H: ${{ secrets.SHARE_H }}
+          N: "8"
+          DUR: "50"
+        run: |
+          python3 -m pip install --quiet aiohttp 2>/dev/null || pip install --quiet aiohttp
+          python3 - <<'PY'
+          import asyncio, aiohttp, base64, json, os, time
+
+          CFG = json.loads(base64.b64decode(os.environ["SHARE_H"]).decode())
+          H = CFG["host"]
+          N = int(os.environ.get("N", "8"))
+          DUR = int(os.environ.get("DUR", "50"))
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          AUTH = base64.b64encode(CFG["auth"].encode()).decode()
+          HD = {"User-Agent": UA, "Authorization": AUTH, "Accept-Language": "zh-CN,zh;q=0.9", "Referer": CFG["ref"]}
+
+          def H_(tok, accept="application/json, text/plain, */*"):
+              h = dict(HD)
+              h["Token"] = tok
+              h["Accept"] = accept
+              return h
+
+          async def login(s):
+              h = dict(HD)
+              h["Content-Type"] = "application/json"
+              async with s.post(H + CFG["l"], json={"grantType": "PASSWORD", "username": CFG["mob"], "password": CFG["pwd"], "type": "10"}, headers=h, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                  d = await r.json()
+              print("L code=%s" % d.get("code"), flush=True)
+              return (d.get("data") or {}).get("token")
+
+          async def tdump(s, tok, tag):
+              t0 = time.time()
+              async with s.get(H + CFG["td"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=60)) as r:
+                  print("%s http=%s ms=%d" % (tag, r.status, int((time.time()-t0)*1000)), flush=True)
+                  if r.status != 200:
+                      print(tag, "body", (await r.text())[:300], flush=True)
+                      return
+                  d = await r.json()
+              ths = d.get("threads") or []
+              xn = [t for t in ths if "XNIO" in (t.get("name") or "")]
+              st = {}
+              for t in ths:
+                  k = t.get("threadState") or "?"
+                  st[k] = st.get(k, 0) + 1
+              print("%s total=%d xnio=%d %s" % (tag, len(ths), len(xn), json.dumps(st)), flush=True)
+
+          async def probe(s, tok):
+              t0 = time.time()
+              try:
+                  async with s.get(H + CFG["p"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=25)) as r:
+                      await r.read()
+                      return int((time.time()-t0)*1000)
+              except Exception:
+                  return -1
+
+          async def slowread(s, tok, i):
+              t0 = time.time()
+              got = 0
+              try:
+                  async with s.get(H + CFG["hd"], headers=H_(tok, "application/octet-stream"), timeout=aiohttp.ClientTimeout(total=DUR+60, sock_read=DUR+60)) as r:
+                      print("HD http=%s len=%s" % (r.status, r.content_length), flush=True)
+                      if r.status != 200:
+                          print("HD body", (await r.text())[:300], flush=True)
+                          return
+                      end = time.time() + DUR
+                      while time.time() < end:
+                          c = await r.content.read(262144)
+                          if not c:
+                              break
+                          got += len(c)
+                          await asyncio.sleep(1)
+              except Exception as e:
+                  print("HD err", i, type(e).__name__, flush=True)
+              print("HD ok got=%dKB t=%.0fs" % (got // 1024, time.time()-t0), flush=True)
+
+          async def main():
+              conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=5)
+              async with aiohttp.ClientSession(connector=conn) as s:
+                  tok = await login(s)
+                  if not tok:
+                      raise SystemExit("no tok")
+                  await tdump(s, tok, "TD1")
+                  for _ in range(3):
+                      print("P pre ms=%d" % await probe(s, tok), flush=True)
+                  tasks = [asyncio.create_task(slowread(s, tok, i)) for i in range(N)]
+                  await asyncio.sleep(20)
+                  await tdump(s, tok, "TD2")
+                  while not all(t.done() for t in tasks):
+                      print("P mid ms=%d" % await probe(s, tok), flush=True)
+                      await asyncio.sleep(10)
+                  await asyncio.gather(*tasks, return_exceptions=True)
+                  await tdump(s, tok, "TD3")
+                  for _ in range(2):
+                      print("P post ms=%d" % await probe(s, tok), flush=True)
+              print("done", flush=True)
+
+          asyncio.run(main())
+          PY
