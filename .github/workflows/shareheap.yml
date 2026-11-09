@@ -32,22 +32,50 @@ jobs:
               h["Accept"] = accept
               return h
 
-          async def login(s):
+          async def login(s, mob):
               h = dict(HD)
               h["Content-Type"] = "application/json"
-              async with s.post(H + CFG["l"], json={"grantType": "PASSWORD", "username": CFG["mob"], "password": CFG["pwd"], "type": "10"}, headers=h, timeout=aiohttp.ClientTimeout(total=30)) as r:
-                  d = await r.json()
-              print("L code=%s" % d.get("code"), flush=True)
-              return (d.get("data") or {}).get("token")
+              for t in CFG["ts"]:
+                  try:
+                      async with s.post(H + CFG["l"], json={"grantType": "PASSWORD", "username": mob, "password": CFG["pwd"], "type": t}, headers=h, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                          d = await r.json()
+                  except Exception:
+                      continue
+                  tok = (d.get("data") or {}).get("token")
+                  if tok:
+                      print("L %s code=%s t=%s" % (mob[-4:], d.get("code"), t), flush=True)
+                      return tok
+              print("L %s none" % mob[-4:], flush=True)
+              return None
+
+          async def perms(s, tok, mob):
+              try:
+                  async with s.get(H + CFG["pl"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=30)) as r:
+                      d = await r.json()
+              except Exception:
+                  print("PL %s err" % mob[-4:], flush=True)
+                  return
+              ps = d.get("data") or []
+              print("PL %s n=%d %s" % (mob[-4:], len(ps), json.dumps(ps)[:1500]), flush=True)
+              try:
+                  async with s.get(H + CFG["rl"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=30)) as r:
+                      d2 = await r.json()
+                  print("RL %s %s" % (mob[-4:], json.dumps(d2.get("data"))[:300]), flush=True)
+              except Exception:
+                  pass
 
           async def tdump(s, tok, tag):
               t0 = time.time()
-              async with s.get(H + CFG["td"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=60)) as r:
-                  print("%s http=%s ms=%d" % (tag, r.status, int((time.time()-t0)*1000)), flush=True)
-                  if r.status != 200:
-                      print(tag, "body", (await r.text())[:300], flush=True)
-                      return
-                  d = await r.json()
+              try:
+                  async with s.get(H + CFG["td"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=60)) as r:
+                      print("%s http=%s ms=%d" % (tag, r.status, int((time.time()-t0)*1000)), flush=True)
+                      if r.status != 200:
+                          print(tag, "body", (await r.text())[:200], flush=True)
+                          return r.status
+                      d = await r.json()
+              except Exception as e:
+                  print(tag, "err", type(e).__name__, flush=True)
+                  return 0
               ths = d.get("threads") or []
               xn = [t for t in ths if "XNIO" in (t.get("name") or "")]
               st = {}
@@ -55,6 +83,7 @@ jobs:
                   k = t.get("threadState") or "?"
                   st[k] = st.get(k, 0) + 1
               print("%s total=%d xnio=%d %s" % (tag, len(ths), len(xn), json.dumps(st)), flush=True)
+              return r.status
 
           async def probe(s, tok):
               t0 = time.time()
@@ -72,7 +101,7 @@ jobs:
                   async with s.get(H + CFG["hd"], headers=H_(tok, "application/octet-stream"), timeout=aiohttp.ClientTimeout(total=DUR+60, sock_read=DUR+60)) as r:
                       print("HD http=%s len=%s" % (r.status, r.content_length), flush=True)
                       if r.status != 200:
-                          print("HD body", (await r.text())[:300], flush=True)
+                          print("HD body", (await r.text())[:200], flush=True)
                           return
                       end = time.time() + DUR
                       while time.time() < end:
@@ -88,22 +117,30 @@ jobs:
           async def main():
               conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=5)
               async with aiohttp.ClientSession(connector=conn) as s:
-                  tok = await login(s)
-                  if not tok:
-                      raise SystemExit("no tok")
-                  await tdump(s, tok, "TD1")
+                  good = None
+                  for k, mob in enumerate(CFG["mobs"]):
+                      tok = await login(s, mob)
+                      if not tok:
+                          continue
+                      await perms(s, tok, mob)
+                      st = await tdump(s, tok, "TD%d" % (k + 1))
+                      if st == 200 and not good:
+                          good = tok
+                  if not good:
+                      print("SKIP slow phase", flush=True)
+                      return
                   for _ in range(3):
-                      print("P pre ms=%d" % await probe(s, tok), flush=True)
-                  tasks = [asyncio.create_task(slowread(s, tok, i)) for i in range(N)]
+                      print("P pre ms=%d" % await probe(s, good), flush=True)
+                  tasks = [asyncio.create_task(slowread(s, good, i)) for i in range(N)]
                   await asyncio.sleep(20)
-                  await tdump(s, tok, "TD2")
+                  await tdump(s, good, "TDmid")
                   while not all(t.done() for t in tasks):
-                      print("P mid ms=%d" % await probe(s, tok), flush=True)
+                      print("P mid ms=%d" % await probe(s, good), flush=True)
                       await asyncio.sleep(10)
                   await asyncio.gather(*tasks, return_exceptions=True)
-                  await tdump(s, tok, "TD3")
+                  await tdump(s, good, "TDpost")
                   for _ in range(2):
-                      print("P post ms=%d" % await probe(s, tok), flush=True)
+                      print("P post ms=%d" % await probe(s, good), flush=True)
               print("done", flush=True)
 
           asyncio.run(main())
