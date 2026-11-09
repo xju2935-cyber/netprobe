@@ -32,37 +32,40 @@ jobs:
               h["Accept"] = accept
               return h
 
-          async def login(s, mob):
+          async def login(s, mob, typ, merc=None):
               h = dict(HD)
               h["Content-Type"] = "application/json"
-              for t in CFG["ts"]:
-                  try:
-                      async with s.post(H + CFG["l"], json={"grantType": "PASSWORD", "username": mob, "password": CFG["pwd"], "type": t}, headers=h, timeout=aiohttp.ClientTimeout(total=30)) as r:
-                          d = await r.json()
-                  except Exception:
-                      continue
-                  tok = (d.get("data") or {}).get("token")
-                  if tok:
-                      print("L %s code=%s t=%s" % (mob[-4:], d.get("code"), t), flush=True)
-                      return tok
-              print("L %s none" % mob[-4:], flush=True)
-              return None
+              body = {"grantType": "PASSWORD", "username": mob, "password": CFG["pwd"], "type": typ}
+              if merc:
+                  body["mercNo"] = merc
+              try:
+                  async with s.post(H + CFG["l"], json=body, headers=h, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                      d = await r.json()
+              except Exception:
+                  print("L %s t=%s none" % (mob[-4:], typ), flush=True)
+                  return None
+              tok = (d.get("data") or {}).get("token")
+              print("L %s t=%s code=%s msg=%s" % (mob[-4:], typ, d.get("code"), str(d.get("msg"))[:60]), flush=True)
+              return tok
 
-          async def perms(s, tok, mob):
+          async def sess(s, tok):
+              try:
+                  async with s.get(H + CFG["v"] + tok, headers=H_(tok), timeout=aiohttp.ClientTimeout(total=30)) as r:
+                      d = await r.json()
+              except Exception:
+                  return {}
+              return (d.get("data") or {}).get("dataMap") or {}
+
+          async def perms(s, tok, tag):
               try:
                   async with s.get(H + CFG["pl"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=30)) as r:
                       d = await r.json()
               except Exception:
-                  print("PL %s err" % mob[-4:], flush=True)
-                  return
+                  print("PL %s err" % tag, flush=True)
+                  return []
               ps = d.get("data") or []
-              print("PL %s n=%d %s" % (mob[-4:], len(ps), json.dumps(ps)[:1500]), flush=True)
-              try:
-                  async with s.get(H + CFG["rl"], headers=H_(tok), timeout=aiohttp.ClientTimeout(total=30)) as r:
-                      d2 = await r.json()
-                  print("RL %s %s" % (mob[-4:], json.dumps(d2.get("data"))[:300]), flush=True)
-              except Exception:
-                  pass
+              print("PL %s n=%d %s" % (tag, len(ps), json.dumps(ps)[:400]), flush=True)
+              return ps
 
           async def tdump(s, tok, tag):
               t0 = time.time()
@@ -118,14 +121,23 @@ jobs:
               conn = aiohttp.TCPConnector(limit=0, limit_per_host=0, ttl_dns_cache=30, keepalive_timeout=5)
               async with aiohttp.ClientSession(connector=conn) as s:
                   good = None
-                  for k, mob in enumerate(CFG["mobs"]):
-                      tok = await login(s, mob)
-                      if not tok:
-                          continue
-                      await perms(s, tok, mob)
-                      st = await tdump(s, tok, "TD%d" % (k + 1))
-                      if st == 200 and not good:
-                          good = tok
+                  for mob in CFG["mobs"]:
+                      dm = {}
+                      tok = await login(s, mob, "10")
+                      if tok:
+                          dm = await sess(s, tok)
+                          print("S %s %s" % (mob[-4:], json.dumps(dm, ensure_ascii=False)[:300]), flush=True)
+                          if "*" in await perms(s, tok, "10"):
+                              good = tok
+                              break
+                      if dm.get("MercNo"):
+                          tok2 = await login(s, mob, "20", dm["MercNo"])
+                          if tok2:
+                              dm2 = await sess(s, tok2)
+                              print("S %s %s" % (mob[-4:], json.dumps(dm2, ensure_ascii=False)[:300]), flush=True)
+                              if "*" in await perms(s, tok2, "20"):
+                                  good = tok2
+                                  break
                   if not good:
                       print("SKIP slow phase", flush=True)
                       return
